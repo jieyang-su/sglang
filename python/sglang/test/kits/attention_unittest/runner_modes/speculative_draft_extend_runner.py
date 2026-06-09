@@ -1078,6 +1078,10 @@ class _EagleDraftExtendWorkerHarness:
     def draft_model_runner(self):
         return self.model_runner
 
+    @property
+    def draft_runner(self):
+        return self.model_runner
+
 
 class _EagleDraftExtendV2WorkerHarness:
     def __init__(
