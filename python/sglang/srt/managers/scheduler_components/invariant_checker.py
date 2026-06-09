@@ -249,7 +249,6 @@ class SchedulerInvariantChecker:
         the allocator free set) but belong to neither the radix tree nor any active
         request's req_to_token row. Pinpoints slots orphaned by a prior free path."""
         try:
-            import torch
 
             alloc = self.token_to_kv_pool_allocator
             free_pages = getattr(alloc, "free_pages", None)
