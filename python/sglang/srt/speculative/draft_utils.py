@@ -337,9 +337,7 @@ class DraftBackendFactory:
                 DeepseekV4HipRadixBackend,
             )
 
-            return DeepseekV4HipRadixBackend(
-                self.draft_model_runner, skip_prefill=False
-            )
+            return DeepseekV4HipRadixBackend(self.draft_runner, skip_prefill=False)
         from sglang.srt.layers.attention.deepseek_v4_backend import (
             DeepseekV4AttnBackend,
         )
