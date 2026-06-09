@@ -925,6 +925,28 @@ class Scheduler(
         self.active_reqs[req.rid] = req
 
     def _deactivate_req(self, req: Req) -> None:
+        # Catch a request leaving active_reqs while it still holds a pool slot:
+        # release_kv_cache -> req_to_token_pool.free() sets req_pool_idx = None, so a
+        # non-None idx here means its KV was never freed (a pool leak source). Log it
+        # so the leaking deactivation path is identifiable from the crash/CI log.
+        if (
+            req.req_pool_idx is not None
+            and not req.is_dllm()
+            and envs.SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_BUSY.get()
+        ):
+            logger.error(
+                "[Leak?] deactivating rid=%s with unfreed pool slot: pool_idx=%s "
+                "committed=%s allocated=%s committed_freed=%s overalloc_freed=%s "
+                "finished=%s retracted=%s",
+                req.rid[:8],
+                req.req_pool_idx,
+                req.kv_committed_len,
+                req.kv_allocated_len,
+                req.kv_committed_freed,
+                req.kv_overallocated_freed,
+                req.finished(),
+                req.is_retracted,
+            )
         self.active_reqs.pop(req.rid, None)
 
     def _assert_reqs_invariants(self) -> None:
