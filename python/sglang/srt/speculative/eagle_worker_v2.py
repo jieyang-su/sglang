@@ -188,8 +188,7 @@ class EagleDraftWorker(BaseDraftWorker):
                 memory_pool_config=target_worker.model_runner.memory_pool_config,
             )
 
-        # Alias for better readability. Backed by `_draft_runner` because
-        # `DraftExecutor` declares `draft_runner` as an abstract @property.
+        # Backs the abstract `DraftExecutor.draft_runner` property.
         self._draft_runner = self.draft_worker.model_runner
         self.eagle_use_aux_hidden_state = False
         if self.speculative_algorithm.is_eagle3():
@@ -1334,7 +1333,6 @@ class EAGLEWorkerV2(BaseSpecWorker):
                 bs,
             )
 
-        # Construct the next draft input
         next_draft_input = EagleDraftInputV2(bonus_tokens=bonus_tokens)
 
         # verify_forward_batch transitively holds verify-time GPU tensors

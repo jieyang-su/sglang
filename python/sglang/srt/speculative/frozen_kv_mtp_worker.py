@@ -197,7 +197,7 @@ class FrozenKVMTPWorker(TpModelWorker, DraftExecutor, SpecCoordinator):
 
     @property
     def draft_worker(self) -> DraftExecutor:
-        # V1 monolithic: this worker is both coordinator and draft executor.
+        # Monolithic: this worker is both coordinator and draft executor.
         return self
 
     def get_attn_backend(self):  # pragma: no cover - exposed for adaptive

@@ -12,17 +12,14 @@ if TYPE_CHECKING:
 class DraftExecutor(ABC):
     """Contract for the draft-execution layer of speculative decoding.
 
-    Implementations either run the draft model on `self` (V1 monolithic
-    `EAGLEWorker(TpModelWorker, DraftExecutor)`) or wrap an inner draft
-    `TpModelWorker` (V2 `EagleDraftWorker`). `draft_runner` is the canonical
-    accessor; shape classmethods on `EagleDraftInput` / `EagleDraftExtendInput`
-    read it directly.
+    Implementations either run the draft model on `self` (monolithic
+    `FrozenKVMTPWorker`) or wrap an inner draft `TpModelWorker` (V2
+    `EagleDraftWorker`). `draft_runner` is the canonical accessor; spec-info
+    shape classmethods read it directly.
 
-    The fields below (`target_worker`, `speculative_algorithm`,
-    `eagle_use_aux_hidden_state`) are declared as type annotations rather than
-    `@abstractmethod` properties because subclasses set them as instance attrs
-    in `__init__`; Python ABC would reject instance attrs as a valid override
-    of a strict abstract property.
+    The fields below are type annotations rather than abstract properties
+    because subclasses set them as instance attrs in `__init__`, which ABC
+    would reject as an override of a strict abstract property.
     """
 
     target_worker: "TpModelWorker"
@@ -49,22 +46,16 @@ class DraftExecutor(ABC):
     @abstractmethod
     def init_cuda_graphs(self) -> None: ...
 
-    # NOTE: V2 draft executors (`EagleDraftWorker`, `MultiLayerEagleDraftWorker`)
-    # additionally expose `draft(...)` and `draft_extend(...)` as their per-phase
-    # entry points. V1 monolithic workers (`EAGLEWorker` & subclasses) drive both
-    # phases internally from `forward_batch_generation`; they do not expose those
-    # methods. Formalizing the per-phase signature is left to a later step where
-    # V1 is split into coordinator + executor.
+    # NOTE: V2 draft executors additionally expose `draft(...)` / `draft_extend(...)`
+    # per-phase entry points; monolithic workers drive both phases internally from
+    # `forward_batch_generation`. Formalizing the per-phase signature is left to a
+    # later step.
 
 
 class NullDraftExecutor(DraftExecutor):
-    """Concrete no-op `DraftExecutor` for algorithms that derive draft tokens
-    without running a draft model (e.g. `NGRAM` corpus lookup).
-
-    The host `SpecCoordinator` keeps a reference to a `NullDraftExecutor` so the
-    coordinator/executor type contract holds uniformly across all spec
-    algorithms — the draft side is simply absent rather than duck-typed.
-    """
+    """No-op `DraftExecutor` for algorithms with no draft model (e.g. `NGRAM`
+    corpus lookup), so the coordinator/executor type contract holds uniformly
+    -- the draft side is explicitly absent rather than duck-typed."""
 
     def __init__(
         self,
@@ -102,15 +93,12 @@ BaseDraftWorker = DraftExecutor
 
 
 class SpecCoordinator(ABC):
-    """Contract for the spec-pipeline-coordinating layer.
+    """Contract for the spec-pipeline-coordinating layer: drives the draft /
+    verify / extend pipeline. Holds a `target_worker` and a `draft_worker`
+    (a `DraftExecutor` -- possibly `self` for monolithic workers, or
+    `NullDraftExecutor` for no-draft-model algorithms).
 
-    A `SpecCoordinator` drives the draft / verify / extend pipeline. It holds a
-    `target_worker` (target model) and a `draft_worker` (a `DraftExecutor`,
-    possibly `self` for V1 monolithic workers, or `NullDraftExecutor` for
-    no-draft-model algorithms).
-
-    `target_worker` and `speculative_algorithm` are declared as type annotations
-    rather than abstract properties — see `DraftExecutor` for the same rationale.
+    Type annotations instead of abstract properties -- see `DraftExecutor`.
     """
 
     target_worker: "TpModelWorker"

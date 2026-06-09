@@ -52,13 +52,9 @@ def _get_fused_kv_materialize_helper():
 
 
 class DFlashDraftExecutor(DraftExecutor):
-    """DraftExecutor wrapping the inner draft `TpModelWorker` used by DFlash.
-
-    Holds a reference to the inner draft TpModelWorker; exposes the canonical
-    `draft_runner` accessor expected by spec-info shape classmethods. DFlash's
-    attention-backend / cuda-graph setup remains driven by the coordinator (it
-    is intertwined with the verify pipeline), so this executor's
-    `init_*` methods are no-ops.
+    """DraftExecutor wrapping DFlash's inner draft `TpModelWorker`. The
+    attention-backend / cuda-graph setup stays on the coordinator (it is
+    intertwined with the verify pipeline), so the `init_*` methods are no-ops.
     """
 
     def __init__(
@@ -1216,7 +1212,7 @@ class DFlashSpecCoordinator(SpecCoordinator):
             self._append_target_hidden_to_draft_kv(batch, draft_input)
 
             # Scheduler installs draft_input on batch.spec_info via
-            # batch_result.next_draft_input — see scheduler.py unified install.
+            # batch_result.next_draft_input -- see scheduler.py unified install.
             return GenerationBatchResult(
                 logits_output=logits_output,
                 next_token_ids=next_token_ids,

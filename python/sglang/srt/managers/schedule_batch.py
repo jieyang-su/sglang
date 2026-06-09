@@ -2642,11 +2642,9 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         v1_spec_info_filtered: Optional[bool] = False,
     ):
         # Lockstep invariant: `reqs`, `seq_lens`, `req_pool_indices`,
-        # `orig_seq_lens`, `seq_lens_cpu` must share length. Producer-side
-        # producers (workers publishing new_seq_lens through FutureMap, etc.)
-        # catch most violations earlier; this final check makes any leaked
-        # breakage land here with a clean stack instead of as a delayed CUDA
-        # OOB inside `seq_lens[keep_indices]`.
+        # `orig_seq_lens`, `seq_lens_cpu` must share length. Any leaked
+        # violation lands here with a clean stack instead of as a delayed
+        # CUDA OOB inside `seq_lens[keep_indices]`.
         n_reqs = len(self.reqs)
         assert self.seq_lens is None or self.seq_lens.size(0) == n_reqs, (
             f"[filter_batch] seq_lens.size(0)={self.seq_lens.size(0)} != len(reqs)={n_reqs}; "
@@ -2678,7 +2676,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         if keep_indices is None or len(keep_indices) == 0:
             # Filter out all requests. Also shrink the per-req lockstep
             # tensors to keep `len(self.reqs) == seq_lens.size(0) == ...`
-            # invariant — leaving them at the pre-filter size leaks stale
+            # invariant -- leaving them at the pre-filter size leaks stale
             # refs into the next filter_batch entry.
             self.reqs = []
             if self.seq_lens is not None:

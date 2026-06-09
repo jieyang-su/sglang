@@ -30,13 +30,9 @@ USE_FULL_MASK = True
 
 
 class NgramSpecCoordinator(SpecCoordinator):
-    """Spec coordinator for the N-gram algorithm.
-
-    NGRAM derives draft tokens from a CPU-side n-gram corpus lookup rather than
-    a draft model. The draft side is exposed as a `NullDraftExecutor` so the
-    `SpecCoordinator + DraftExecutor` type contract holds uniformly across all
-    spec algorithms.
-    """
+    """Spec coordinator for NGRAM: drafts come from a CPU-side n-gram corpus
+    lookup, no draft model. The draft side is a `NullDraftExecutor` so the
+    coordinator/executor type contract holds uniformly."""
 
     def __init__(
         self,
@@ -64,7 +60,7 @@ class NgramSpecCoordinator(SpecCoordinator):
         self.speculative_algorithm = SpeculativeAlgorithm.from_string(
             server_args.speculative_algorithm
         )
-        # NGRAM has no draft model — drafts come from `ngram_corpus.batch_get`.
+        # NGRAM has no draft model -- drafts come from `ngram_corpus.batch_get`.
         # `NullDraftExecutor` makes the absence type-explicit.
         self._draft_worker: DraftExecutor = NullDraftExecutor(
             target_worker, self.speculative_algorithm
@@ -262,12 +258,10 @@ class NgramSpecCoordinator(SpecCoordinator):
 
         batch.spec_algorithm = SpeculativeAlgorithm.NGRAM
         batch.forward_mode = ForwardMode.TARGET_VERIFY
-        # Direct mutate (not GenerationBatchResult.next_draft_input relay):
-        # Ngram has no draft model and no cross-iter draft state. NgramVerifyInput
-        # is built fresh each iter from CPU corpus lookup, and must be installed
-        # *before* the target forward (target_worker reads spec_info from
-        # batch). The relay model produces draft_input as forward output for
-        # the next iter — that semantic does not apply here.
+        # Direct mutate, not the next_draft_input relay: NGRAM has no cross-iter
+        # draft state. NgramVerifyInput is built fresh each iter from the CPU
+        # corpus and must be installed *before* the target forward (the relay
+        # installs forward *output* for the next iter -- doesn't apply here).
         batch.spec_info = NgramVerifyInput(
             draft_tokens,
             tree_mask,

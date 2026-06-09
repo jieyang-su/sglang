@@ -154,11 +154,9 @@ class MultiLayerEagleDraftWorker(BaseDraftWorker):
                 is_multi_layer_eagle=True,
             )
 
-        # Alias for better readability
         self.draft_runner_list: List[ModelRunner] = self.draft_worker.model_runner_list
-        # `draft_runner` (single) is the canonical shape entry expected by the
-        # `EagleDraftInput` shape classmethods in eagle_info.py. Backed by
-        # `_draft_runner` because `DraftExecutor` declares it as abstract @property.
+        # Layer 0 backs the abstract `DraftExecutor.draft_runner` property
+        # (the canonical shape entry for spec-info classmethods).
         self._draft_runner: ModelRunner = self.draft_runner_list[0]
 
         self.eagle_use_aux_hidden_state = False
@@ -868,7 +866,6 @@ class MultiLayerEagleWorkerV2(BaseSpecWorker):
                 self.speculative_num_steps,
             )
 
-        # Construct the next draft input
         next_draft_input = EagleDraftInputV2(bonus_tokens=bonus_tokens)
         # verify_forward_batch transitively holds verify-time GPU tensors that
         # must outlive the imminent batch.input_ids rebind; scheduler pins it

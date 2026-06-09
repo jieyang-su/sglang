@@ -110,8 +110,7 @@ class StandaloneDraftWorker(EagleDraftWorker):
                 memory_pool_config=target_worker.model_runner.memory_pool_config,
             )
 
-        # Alias for better readability. Backed by `_draft_runner` because
-        # `DraftExecutor` declares `draft_runner` as an abstract @property.
+        # Backs the abstract `DraftExecutor.draft_runner` property.
         self._draft_runner = self.draft_worker.model_runner
 
         self.init_token_map()

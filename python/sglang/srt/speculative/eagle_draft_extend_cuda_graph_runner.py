@@ -72,9 +72,9 @@ class EAGLEDraftExtendCudaGraphRunner:
         # Parse args
         self.eagle_worker = eagle_worker
         self.model_runner = model_runner = eagle_worker.draft_runner
-        # V1 `EAGLEWorker(TpModelWorker)` has `.model_runner`; V2 `EagleDraftWorker`
-        # wraps an inner `TpModelWorker` and does not. Used here only to pick the
-        # correct ForwardMode for draft extend.
+        # Monolithic TpModelWorker-based workers have `.model_runner`; V2
+        # `EagleDraftWorker` wraps an inner `TpModelWorker` and does not. Used
+        # here only to pick the correct ForwardMode for draft extend.
         if hasattr(eagle_worker, "model_runner"):
             self.forward_mode = ForwardMode.DRAFT_EXTEND
         else:

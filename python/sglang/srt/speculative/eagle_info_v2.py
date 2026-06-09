@@ -348,11 +348,10 @@ class EagleVerifyOutputV2(EagleVerifyOutput):
     sampled token tensor, shape `[bs * draft_token_num]`) which V2's overlap
     pipeline uses as `GenerationBatchResult.next_token_ids` to slice without
     a GPU->CPU sync. V1 paths produce the base `EagleVerifyOutput` and have
-    no `predict` field — they read tokens from `accept_tokens` instead.
+    no `predict` field -- they read tokens from `accept_tokens` instead.
 
-    `kw_only=True` because parent has defaulted `can_run_cuda_graph` and
-    Python dataclass forbids non-defaulted subclass fields after defaulted
-    parent fields; kw-only side-steps this so V2 can require `predict`."""
+    `kw_only=True`: dataclass forbids the required `predict` after the
+    parent's defaulted fields; kw-only side-steps the ordering rule."""
 
     predict: torch.Tensor
 
@@ -688,4 +687,3 @@ class EagleVerifyInputV2(EagleVerifyInput):
             accept_indices=accept_index,
             predict=predict,
         )
-
