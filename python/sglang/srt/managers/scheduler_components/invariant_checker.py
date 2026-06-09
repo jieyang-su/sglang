@@ -239,9 +239,68 @@ class SchedulerInvariantChecker:
 
         if full_leak or swa_leak:
             self._dump_active_req_kv_state(full_uncached, swa_uncached)
+            self._dump_leaked_slots()
 
         assert not full_leak, f"Full Pool Mem Leak Detected! {full_msg}"
         assert not swa_leak, f"SWA Pool Mem Leak Detected! {swa_msg}"
+
+    def _dump_leaked_slots(self) -> None:
+        """Identify the leaked full-pool slots: indices that are allocated (not in
+        the allocator free set) but belong to neither the radix tree nor any active
+        request's req_to_token row. Pinpoints slots orphaned by a prior free path."""
+        try:
+            import torch
+
+            alloc = self.token_to_kv_pool_allocator
+            free_pages = getattr(alloc, "free_pages", None)
+            if free_pages is None:
+                logger.error("[Leaked slots] allocator has no free_pages; skip")
+                return
+            free = set(free_pages.tolist())
+            release_pages = getattr(alloc, "release_pages", None)
+            if release_pages is not None and release_pages.numel():
+                free |= set(release_pages.tolist())
+
+            total = int(alloc.size)
+            used = set(range(1, total + 1)) - free  # slot 0 is the null/padding slot
+
+            # Slots referenced by the radix tree (cached: protected + evictable).
+            tree_slots = set()
+            root = getattr(self.tree_cache, "root_node", None)
+            if root is not None:
+                stack = [root]
+                while stack:
+                    node = stack.pop()
+                    val = getattr(node, "value", None)
+                    if val is not None and not isinstance(val, list) and val.numel():
+                        tree_slots.update(val.tolist())
+                    children = getattr(node, "children", None)
+                    if children:
+                        stack.extend(children.values())
+
+            # Slots referenced by active requests' req_to_token rows.
+            active_slots = set()
+            r2t = self.req_to_token_pool.req_to_token
+            for req in self.get_active_reqs().values():
+                if req.req_pool_idx is None:
+                    continue
+                n = int(req.kv_allocated_len)
+                if n > 0:
+                    active_slots.update(r2t[req.req_pool_idx, :n].tolist())
+
+            orphans = used - tree_slots - active_slots
+            orphans.discard(0)
+            sample = sorted(orphans)[:40]
+            logger.error(
+                "[Leaked slots] used=%d tree=%d active=%d orphans=%d sample=%s",
+                len(used),
+                len(tree_slots),
+                len(active_slots),
+                len(orphans),
+                sample,
+            )
+        except Exception:
+            logger.exception("[Leaked slots] failed to enumerate orphaned slots")
 
     def _dump_active_req_kv_state(self, full_uncached: int, swa_uncached: int) -> None:
         """Log per-active-req KV accounting when a pool leak is detected, so the

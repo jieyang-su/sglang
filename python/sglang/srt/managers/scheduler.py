@@ -929,8 +929,12 @@ class Scheduler(
         # release_kv_cache -> req_to_token_pool.free() sets req_pool_idx = None, so a
         # non-None idx here means its KV was never freed (a pool leak source). Log it
         # so the leaking deactivation path is identifiable from the crash/CI log.
+        reserve_unfreed = (
+            req.kv_allocated_len > req.kv_committed_len
+            and not req.kv_overallocated_freed
+        )
         if (
-            req.req_pool_idx is not None
+            (req.req_pool_idx is not None or reserve_unfreed)
             and not req.is_dllm()
             and envs.SGLANG_ENABLE_STRICT_MEM_CHECK_DURING_BUSY.get()
         ):
