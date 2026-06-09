@@ -1332,6 +1332,10 @@ class EAGLEWorkerV2(BaseSpecWorker):
                 logits_output,
                 bs,
             )
+            # The compaction rebinds `logits_output.hidden_states` to a new
+            # tensor; re-sync the draft-extend input captured in `sample()`,
+            # which still references the pre-compaction layout.
+            verify_output.draft_extend_input.hidden_states = logits_output.hidden_states
 
         next_draft_input = EagleDraftInputV2(bonus_tokens=bonus_tokens)
 

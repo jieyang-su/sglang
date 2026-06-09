@@ -254,6 +254,10 @@ class _FrozenKVMTPWorkerHarness:
         return self.model_runner
 
     @property
+    def draft_runner(self):
+        return self.model_runner
+
+    @property
     def _recurrent_hidden_size(self) -> int:
         return self._hidden_size
 
