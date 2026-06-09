@@ -932,7 +932,7 @@ class SchedulerDisaggregationPrefillMixin:
         end_idx = (
             end_idx
             if end_idx is not None
-            else min(req.extend_range.end, len(req.origin_input_ids))
+            else min(req.kv_committed_len, len(req.origin_input_ids))
         )
 
         if not last_chunk:
@@ -963,7 +963,7 @@ class SchedulerDisaggregationPrefillMixin:
             # length here avoids emitting an extra state page when the sampled
             # token crosses a page boundary, which mismatched src/dst lengths in
             # group_concurrent_contiguous.
-            seq_len = min(req.extend_range.end, len(req.origin_input_ids))
+            seq_len = min(req.kv_committed_len, len(req.origin_input_ids))
 
             def _mamba_payload():
                 return [
