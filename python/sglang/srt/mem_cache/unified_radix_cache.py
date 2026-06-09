@@ -729,8 +729,13 @@ class UnifiedRadixCache(KVCacheEventMixin, BasePrefixCache):
         assert (
             req.extend_range is None or req.extend_range.end <= req.kv_committed_len
         ), f"Sanity check since migrating extend_fill_len to kv_committed_len: {req.extend_range.end=} {req.kv_committed_len=}"
+        # See radix_cache.cache_unfinished_req: cap at max(prompt, cache_protected_len)
+        # so a retracted req's protected prefix is fully re-cached (no lock leak).
         token_ids = req.get_full_untruncated_fill_ids()[
-            : min(req.kv_committed_len, len(req.origin_input_ids))
+            : min(
+                req.kv_committed_len,
+                max(len(req.origin_input_ids), req.cache_protected_len),
+            )
         ]
 
         if self.disable:

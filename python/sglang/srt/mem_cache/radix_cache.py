@@ -474,8 +474,16 @@ class RadixCache(KVCacheEventMixin, BasePrefixCache):
         assert (
             req.extend_range is None or req.extend_range.end <= req.kv_committed_len
         ), f"Sanity check since migrating extend_fill_len to kv_committed_len: {req.extend_range.end=} {req.kv_committed_len=}"
+        # Cap at max(prompt, cache_protected_len): a retracted req that re-prefilled
+        # can have a matched/locked prefix (cache_protected_len) extending past the
+        # prompt into committed output tokens cached before the retract. Clamping to
+        # the prompt alone would re-cache fewer tokens than are protected, dropping
+        # cache_protected_len and leaking the extra slot's lock.
         token_ids = req.get_full_untruncated_fill_ids()[
-            : min(req.kv_committed_len, len(req.origin_input_ids))
+            : min(
+                req.kv_committed_len,
+                max(len(req.origin_input_ids), req.cache_protected_len),
+            )
         ]
         kv_indices = self.req_to_token_pool.req_to_token[
             req.req_pool_idx, : len(token_ids)
