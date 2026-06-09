@@ -3127,10 +3127,10 @@ class Scheduler(
                         batch.input_ids = batch_result.next_token_ids.to(torch.int64)
                 self.update_cache_from_scheduler(batch, batch_result)
 
-            # V1 non-overlap workers return next_draft_input via batch_result;
-            # scheduler installs it on batch.spec_info (was: worker-internal
-            # mutation). Overlap branch handles spec_v2 above; this catches
-            # the non-overlap path.
+            # Non-overlap workers (e.g. DFlash) return next_draft_input via
+            # batch_result; scheduler installs it on batch.spec_info (was:
+            # worker-internal mutation). Overlap branch handles spec_v2 above;
+            # this catches the non-overlap path.
             if batch_result.next_draft_input is not None and not self.enable_overlap:
                 batch.spec_info = batch_result.next_draft_input
 

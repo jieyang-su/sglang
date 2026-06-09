@@ -55,9 +55,10 @@ class GenerationBatchResult:
 
     # relay path: forward stream -> next step forward
     # Worker produces a fresh draft state at end of this iter; scheduler
-    # installs it on batch.spec_info before the next iter. Covers all spec
-    # algos that need cross-iter draft state (EAGLE V1/V2, MultiLayer V1/V2,
-    # FrozenKV MTP, DFLASH). Ngram is excluded — see ngram_worker for why.
+    # installs it on batch.spec_info before the next iter. Covers EAGLE /
+    # MultiLayer V2 and DFLASH. FrozenKV MTP installs in place (its seed
+    # forward runs inside the captured draft graph); Ngram is excluded --
+    # see ngram_worker for why.
     next_draft_input: Optional[SpecInput] = None
 
     # Refs the worker wants scheduler to keep alive for the same 2-iter window
