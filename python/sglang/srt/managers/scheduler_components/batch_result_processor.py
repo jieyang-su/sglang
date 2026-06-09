@@ -254,6 +254,15 @@ class SchedulerBatchResultProcessor:
                         if self.server_args.enable_hisparse:
                             self.hisparse_coordinator.admit_request_into_staging(req)
 
+                    # Prefill is complete for this req; it now moves to decode.
+                    # Clear extend_range here (mirroring prepare_for_decode) so the
+                    # req stops reporting has_pending_chunk the instant its first
+                    # output token is appended above. Otherwise get_full_untruncated_fill_len
+                    # grows past the frozen extend_range.end and, in the overlap window
+                    # before prepare_for_decode runs, the req is mis-counted as a chunked
+                    # req — violating the single-flight invariant under concurrency.
+                    req.extend_range = None
+
                     self._maybe_collect_customized_info(i, req, logits_output)
 
                     if batch.return_logprob:
