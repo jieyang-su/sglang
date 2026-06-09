@@ -611,7 +611,7 @@ class MambaRadixCache(KVCacheEventMixin, BasePrefixCache):
 
         def _skip_cache_unfinished_req(req: Req) -> None:
             assert (
-                req.extend_range is None or req.extend_range.end == req.kv_committed_len
+                req.extend_range is None or req.extend_range.end <= req.kv_committed_len
             ), f"Sanity check since migrating extend_fill_len to kv_committed_len: {req.extend_range.end=} {req.kv_committed_len=}"
             kv_indices = self.req_to_token_pool.req_to_token[
                 req.req_pool_idx, : req.kv_committed_len
@@ -622,7 +622,7 @@ class MambaRadixCache(KVCacheEventMixin, BasePrefixCache):
             return
 
         assert (
-            req.extend_range is None or req.extend_range.end == req.kv_committed_len
+            req.extend_range is None or req.extend_range.end <= req.kv_committed_len
         ), f"Sanity check since migrating extend_fill_len to kv_committed_len: {req.extend_range.end=} {req.kv_committed_len=}"
         token_ids = req.get_full_untruncated_fill_ids()[
             : min(req.kv_committed_len, len(req.origin_input_ids))

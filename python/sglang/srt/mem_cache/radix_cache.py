@@ -466,8 +466,13 @@ class RadixCache(KVCacheEventMixin, BasePrefixCache):
         if self.disable:
             return
 
+        # kv_committed_len >= extend_range.end: under spec-v2 the draft's
+        # prepare_for_decode pre-claims a bonus slot (kv_committed_len += 1) which,
+        # in overlap mode, lands before this completed prefill is cached. The cache
+        # below clamps to len(origin_input_ids), so the bonus never gets cached; only
+        # committed < prefilled would be a real bug.
         assert (
-            req.extend_range is None or req.extend_range.end == req.kv_committed_len
+            req.extend_range is None or req.extend_range.end <= req.kv_committed_len
         ), f"Sanity check since migrating extend_fill_len to kv_committed_len: {req.extend_range.end=} {req.kv_committed_len=}"
         token_ids = req.get_full_untruncated_fill_ids()[
             : min(req.kv_committed_len, len(req.origin_input_ids))
