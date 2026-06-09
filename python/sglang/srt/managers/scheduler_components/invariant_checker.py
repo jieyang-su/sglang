@@ -237,8 +237,55 @@ class SchedulerInvariantChecker:
                 for msg in self.recent_busy_msgs:
                     logger.info(msg)
 
+        if full_leak or swa_leak:
+            self._dump_active_req_kv_state(full_uncached, swa_uncached)
+
         assert not full_leak, f"Full Pool Mem Leak Detected! {full_msg}"
         assert not swa_leak, f"SWA Pool Mem Leak Detected! {swa_msg}"
+
+    def _dump_active_req_kv_state(self, full_uncached: int, swa_uncached: int) -> None:
+        """Log per-active-req KV accounting when a pool leak is detected, so the
+        offending request (allocated KV not freed / not accounted) is identifiable
+        from the crash log without a live debugger."""
+        try:
+            last_batch = self.get_last_batch()
+            running_batch = self.get_running_batch()
+            in_last = {id(r) for r in (last_batch.reqs if last_batch else [])}
+            in_running = {
+                id(r)
+                for r in (
+                    running_batch.reqs
+                    if running_batch is not None and not running_batch.is_empty()
+                    else []
+                )
+            }
+            active_reqs = self.get_active_reqs()
+            logger.error(
+                "[Mem Leak dump] full_uncached=%d swa_uncached=%d n_active=%d",
+                full_uncached,
+                swa_uncached,
+                len(active_reqs),
+            )
+            for req in active_reqs.values():
+                logger.error(
+                    "[Mem Leak dump] rid=%s committed=%s allocated=%s protected=%s "
+                    "committed_freed=%s overalloc_freed=%s pending_chunk=%s finished=%s "
+                    "retracted=%s pool_idx=%s in_last=%s in_running=%s",
+                    req.rid[:8],
+                    req.kv_committed_len,
+                    req.kv_allocated_len,
+                    req.cache_protected_len,
+                    req.kv_committed_freed,
+                    req.kv_overallocated_freed,
+                    req.has_pending_chunk,
+                    req.finished(),
+                    req.is_retracted,
+                    req.req_pool_idx,
+                    id(req) in in_last,
+                    id(req) in in_running,
+                )
+        except Exception:
+            logger.exception("[Mem Leak dump] failed to dump active req state")
 
     def _check_req_pool(self):
         if self.disaggregation_mode == DisaggregationMode.DECODE:
