@@ -726,9 +726,7 @@ class FrozenKVMTPWorker(TpModelWorker, DraftExecutor, SpecCoordinator):
                 self._target_kv_pool_view(forward_batch),
                 forward_context(ForwardContext(attn_backend=self.draft_attn_backend)),
             ):
-                logits_output = self.draft_runner.forward(
-                    forward_batch
-                ).logits_output
+                logits_output = self.draft_runner.forward(forward_batch).logits_output
 
             maybe_detect_nan(
                 logits_output.next_token_logits, f"frozen_kv_mtp_draft step {i}"
