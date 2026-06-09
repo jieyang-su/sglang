@@ -625,6 +625,17 @@ class SchedulerDisaggregationPrefillMixin:
                             status_code=HTTPStatus.INTERNAL_SERVER_ERROR,
                         )
                     req.grammar.finished = req.finished()
+
+                # Prefill is complete. The req stays in active_reqs (and the
+                # inflight transfer queue) until the KV send finishes, so clear
+                # extend_range now — mirroring prepare_for_decode and the
+                # bootstrap-failure path below. get_full_untruncated_fill_len()
+                # grows once the output token is appended above, which would push
+                # extend_range.end below it and make has_pending_chunk True; the
+                # stateless single-flight check would then re-derive this finished
+                # req as a chunked req and crash get_new_batch_prefill once more
+                # than one prefill completes in the same window.
+                req.extend_range = None
             else:
                 # being chunked reqs' prefill is not finished
 
