@@ -2602,6 +2602,16 @@ class Scheduler(
             # Reset batch_is_full to try preemption with a prefill adder.
             self.running_batch.batch_is_full = False
 
+        # Requests in running_batch are decoding, not chunk-prefilling. Clear any
+        # extend_range left over from mix_with_running (which sets it to
+        # (full_len-1, full_len) for the mixed forward) or a just-completed prefill,
+        # so has_pending_chunk / chunked_reqs() do not misclassify them as chunked
+        # once their output_ids grow past the stale extend_range.end. A genuinely
+        # chunked-prefill request is never in running_batch.
+        for running_req in self.running_batch.reqs:
+            if not running_req.is_dllm():
+                running_req.extend_range = None
+
         chunked_in_active = self.chunked_reqs()
         assert len(chunked_in_active) <= 1, (
             f"single-flight violated: {len(chunked_in_active)} chunked reqs "
