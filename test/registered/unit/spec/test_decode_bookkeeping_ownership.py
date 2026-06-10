@@ -4,7 +4,8 @@ Per-request accounting state (`decode_batch_idx` / `extend_batch_idx` iter
 clocks, `kv_committed_len` / `kv_allocated_len` KV watermarks,
 `spec_verify_ct`, and the `maybe_evict_swa()` call) must only be advanced by
 the reviewed owner sites in _OWNER_SITES; spec-v2 draft workers must not
-repeat any of them (the scheduler-driven mixin / resolve path already does).
+repeat any of them (the scheduler-driven `EagleDraftInput.prepare_for_decode`
+/ resolve path already does).
 A clock that runs fast fires SWA eviction in the overlap race window and
 releases the SWA prefix lock early; neither shows up in e2e CI or the idle
 leak checker, hence this AST-level guard.
@@ -39,7 +40,7 @@ _EVICT_METHOD = "maybe_evict_swa"
 # attribute (`= 0` resets exempt) or "evict" for a `maybe_evict_swa()` call.
 # Any added/removed/recounted site fails until reviewed here.
 _SB = "managers/schedule_batch.py"
-_MIXIN = ("speculative/eagle_info_v2.py", "EagleDraftInputV2Mixin.prepare_for_decode")
+_DRAFT_DECODE = ("speculative/eagle_info.py", "EagleDraftInput.prepare_for_decode")
 _RESOLVE = (
     "managers/scheduler_components/batch_result_processor.py",
     "SchedulerBatchResultProcessor._resolve_spec_v2_tokens",
@@ -55,17 +56,15 @@ _OWNER_SITES = {
     (_SB, "ScheduleBatch.prepare_for_extend", "kv_allocated_len"): 1,
     ("mem_cache/common.py", "alloc_for_extend", "evict"): 1,
     ("mem_cache/common.py", "alloc_for_decode", "evict"): 1,
-    # spec v2: pre-claim in the scheduler-driven mixin, settle in resolve
-    (*_MIXIN, "decode_batch_idx"): 1,
-    (*_MIXIN, "evict"): 1,
-    (*_MIXIN, "kv_committed_len"): 1,
-    (*_MIXIN, "kv_allocated_len"): 1,
+    # spec v2: pre-claim in the scheduler-driven EagleDraftInput.prepare_for_decode,
+    # settle in resolve
+    (*_DRAFT_DECODE, "decode_batch_idx"): 1,
+    (*_DRAFT_DECODE, "evict"): 1,
+    (*_DRAFT_DECODE, "kv_committed_len"): 1,
+    (*_DRAFT_DECODE, "kv_allocated_len"): 1,
     (*_RESOLVE, "kv_committed_len"): 2,
     (*_RESOLVE, "spec_verify_ct"): 1,
-    # spec v1: each verify path owns its own settlement
-    ("speculative/eagle_info.py", "EagleVerifyInput.verify", "kv_committed_len"): 1,
-    ("speculative/eagle_info.py", "EagleVerifyInput.verify", "kv_allocated_len"): 1,
-    ("speculative/eagle_info.py", "EagleVerifyInput.verify", "spec_verify_ct"): 1,
+    # spec v1 synchronous verify paths (ngram / dflash) own their own settlement
     (
         "speculative/ngram_info.py",
         "NgramVerifyInput._fill_requests",
@@ -244,7 +243,8 @@ class TestDecodeBookkeepingOwnership(CustomTestCase):
             + "\n  ".join(map(str, sorted(violations)))
             + "\nUnder spec v2 the iter-clock ticks, `maybe_evict_swa`, and "
             "KV watermark settlement are owned by the scheduler-driven "
-            "mixin / resolve path. Remove these from the worker.",
+            "`EagleDraftInput.prepare_for_decode` / resolve path. Remove these "
+            "from the worker.",
         )
 
 

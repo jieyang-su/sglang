@@ -450,7 +450,8 @@ class TritonAttnBackend(AttentionBackend):
             device=self.device,
         )
         if forward_mode.is_draft_extend_v2():
-            # DRAFT_EXTEND_V2: seq_lens = prefix + extend (bumped by eagle_info_v2).
+            # DRAFT_EXTEND_V2: seq_lens = prefix + extend (bumped by
+            # EagleDraftInput.prepare_for_extend_to_fill_draft_kvcache).
             # Triton extend kernel receives extend K/V as separate tensors, so
             # kv_indptr/kv_indices must cover only the prefix portion.
             # extend_seq_lens_tensor is only attached to spec_info at real

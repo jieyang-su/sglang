@@ -2376,7 +2376,7 @@ class ScheduleBatch(ScheduleBatchDisaggregationDecodeMixin):
         return num_tokens
 
     def _new_tokens_required_next_decode_spec_v2(self, requests, page_size):
-        """Tight estimate matching eagle_info_v2.prepare_for_decode allocation."""
+        """Tight estimate matching EagleDraftInput.prepare_for_decode allocation."""
         reserve = get_alloc_reserve_per_decode()
         total = 0
         for r in requests:

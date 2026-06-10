@@ -398,7 +398,7 @@ class FrozenKVMTPDraftWorker(BaseDraftWorker, TpModelWorker):
 
         # NOTE: per-iter bookkeeping (penalty cumulation, maybe_evict_swa,
         # decode_batch_idx tick) is done by the inherited
-        # EagleDraftInputV2Mixin.prepare_for_decode (scheduler-driven, see
+        # EagleDraftInput.prepare_for_decode (scheduler-driven, see
         # ScheduleBatch.prepare_for_decode), not here -- matching EAGLE v2.
         # Repeating evict/tick here would double-run them: the idx clock
         # gates SWA eviction timing and the SWA prefix-lock release.

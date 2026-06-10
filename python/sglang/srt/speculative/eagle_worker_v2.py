@@ -51,11 +51,6 @@ from sglang.srt.speculative.eagle_draft_extend_cuda_graph_runner import (
     EAGLEDraftExtendCudaGraphRunner,
 )
 from sglang.srt.speculative.eagle_info import EagleDraftInput, EagleVerifyInput
-from sglang.srt.speculative.eagle_info_v2 import (
-    assign_extend_cache_locs,
-    fill_accept_out_cache_loc,
-    fill_bonus_tokens,
-)
 from sglang.srt.speculative.eagle_utils import (
     TreeMaskMode,
     _eagle_prefill_tail_tokens,
@@ -72,6 +67,11 @@ from sglang.srt.speculative.spec_utils import (
     record_stream_for_v2_verify,
     select_top_k_tokens,
     spec_stage_span,
+)
+from sglang.srt.speculative.triton_ops.cache_locs import assign_extend_cache_locs
+from sglang.srt.speculative.triton_ops.eagle import (
+    fill_accept_out_cache_loc,
+    fill_bonus_tokens,
 )
 from sglang.srt.utils.async_probe import (
     maybe_detect_inf,
