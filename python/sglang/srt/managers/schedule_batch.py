@@ -1018,7 +1018,18 @@ class Req(ReqDllmMixin):
         # overallocated range and are reclaimed by release_kv_cache. #22373.
         if get_global_server_args().strip_thinking_cache and self.reasoning_tokens > 0:
             return min(self.kv_committed_len, len(self.origin_input_ids))
-        return self.kv_committed_len
+        # Clamp to the real token count. Under spec decoding, prepare_for_decode
+        # pre-claims a bonus slot (kv_committed_len += 1) that an overlap-finished
+        # request may not resolve, so kv_committed_len can exceed
+        # len(origin_input_ids) + len(output_ids) by one. cache_finished_req slices
+        # token_ids to the real tokens and never touches that trailing slot, and the
+        # overallocated free starts above it -- so the pre-claimed bonus slot leaks
+        # (one slot per such finish). Reporting the real length pushes that slot into
+        # the overallocated range so release_kv_cache reclaims it.
+        return min(
+            self.kv_committed_len,
+            len(self.origin_input_ids) + len(self.output_ids),
+        )
 
     def pop_committed_kv_cache(self) -> int:
         """Return the length of committed KV cache and mark them as freed."""
