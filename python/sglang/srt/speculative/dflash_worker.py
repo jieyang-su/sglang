@@ -87,17 +87,6 @@ class DFlashWorker:
         self._logged_first_verify = False
 
         # Draft runner (separate KV cache + attention backend).
-        # Without draft windowing, the draft worker aliases the target request->token
-        # mapping and allocation state. With draft windowing enabled, the draft worker
-        # keeps a private compact req->token table over the same global KV index space,
-        # so radix-cache/prefix-hit KV remains reusable while draft attention sees only
-        # the recent window.
-        target_req_to_token_pool, target_token_to_kv_pool_allocator = (
-            target_worker.get_memory_pool()
-        )
-        shared_req_to_token_pool = (
-            None if self.use_compact_draft_cache else target_req_to_token_pool
-        )
         draft_server_args = deepcopy(server_args)
         draft_server_args.skip_tokenizer_init = True
         draft_backend = draft_server_args.speculative_draft_attention_backend
@@ -154,8 +143,6 @@ class DFlashWorker:
             nccl_port=nccl_port,
             is_draft_worker=True,
         )
-        self._shared_req_to_token_pool = shared_req_to_token_pool
-        self._target_token_to_kv_pool_allocator = target_token_to_kv_pool_allocator
         set_global_server_args_for_scheduler(saved_server_args)
         self.draft_model_runner = self.draft_worker.model_runner
         # Keep the same alias that other spec-v2 workers expose.
@@ -247,11 +234,17 @@ class DFlashWorker:
         req_to_token_pool=None,
         token_to_kv_pool_allocator=None,
     ):
+        # Without draft windowing, the draft worker aliases the target
+        # request->token mapping and allocation state. With draft windowing
+        # enabled, the draft worker keeps a private compact req->token table
+        # over the same global KV index space, so radix-cache/prefix-hit KV
+        # remains reusable while draft attention sees only the recent window.
         self.draft_worker.alloc_memory_pool(
             memory_pool_config=memory_pool_config,
-            req_to_token_pool=req_to_token_pool or self._shared_req_to_token_pool,
-            token_to_kv_pool_allocator=token_to_kv_pool_allocator
-            or self._target_token_to_kv_pool_allocator,
+            req_to_token_pool=(
+                None if self.use_compact_draft_cache else req_to_token_pool
+            ),
+            token_to_kv_pool_allocator=token_to_kv_pool_allocator,
         )
 
     def init_backends(self):
