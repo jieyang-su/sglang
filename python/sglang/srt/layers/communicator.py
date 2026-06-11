@@ -29,6 +29,7 @@ from sglang.srt.distributed import (
     moe_tensor_model_parallel_all_reduce,
     tensor_model_parallel_all_reduce,
 )
+from sglang.srt.model_executor.runtime_context import get_context
 from sglang.srt.distributed.device_communicators.pynccl_allocator import (
     use_symmetric_memory,
 )
@@ -234,7 +235,9 @@ class AttentionInputs:
     def tp_all_gather_hidden_states(self, hidden_states, forward_batch):
         total_tokens = forward_batch.input_ids.shape[0]
         output = hidden_states.new_empty((total_tokens, hidden_states.shape[-1]))
-        get_tp_group().all_gather_into_tensor(output, hidden_states)
+        # M0.3 resources: read the long-lived TP group off the context (the same
+        # GroupCoordinator object get_tp_group() returns, seeded in from_model_runner).
+        get_context().parallel.tp_group.all_gather_into_tensor(output, hidden_states)
         return output
 
     def fetch_qkv_latent(self):
@@ -673,7 +676,8 @@ class LayerCommunicator:
         ), f"Expected total tokens {hidden_states.shape[0]} % tp_size {self._context.tp_size} to be 0"
         local_tokens = hidden_states.shape[0] // self._context.tp_size
         output = hidden_states.new_empty(local_tokens, *hidden_states.shape[1:])
-        get_tp_group().reduce_scatter_tensor(output, hidden_states)
+        # M0.3 resources: read the long-lived TP group off the context.
+        get_context().parallel.tp_group.reduce_scatter_tensor(output, hidden_states)
         if residual is not None:
             residual = residual.tensor_split(self._context.tp_size)[
                 self._context.tp_rank

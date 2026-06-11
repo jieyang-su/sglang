@@ -55,6 +55,7 @@ from sglang.srt.layers.dp_attention import (
 from sglang.srt.model_executor.forward_batch_deepseek_mha_mixin import (
     ForwardBatchDeepSeekMHAMixin,
 )
+from sglang.srt.model_executor.runtime_context import get_flags
 from sglang.srt.model_executor.triton_ops.position import compute_position_triton
 from sglang.srt.server_args import get_global_server_args
 from sglang.srt.utils import (
@@ -1126,6 +1127,10 @@ class ForwardBatch(ForwardBatchDeepSeekMHAMixin):
             buffer_len, num_tokens, dp_padding_mode.is_max_len(), global_num_tokens
         )
         set_is_extend_in_batch(self.is_extend_in_batch)
+        # M0.6 dual-write into the per-forward context flag (the sole place the
+        # flag can be True; capture paths force False, which equals the container
+        # default). Legacy global kept for the transition assert; dropped in P6/P8.
+        get_flags().is_extend_in_batch = self.is_extend_in_batch
 
         bs = self.batch_size
 

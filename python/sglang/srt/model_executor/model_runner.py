@@ -161,6 +161,12 @@ from sglang.srt.model_executor.forward_context import (
     forward_context,
     has_forward_context,
 )
+from sglang.srt.model_executor.runtime_context import (
+    get_context,
+    get_tp_rank,
+    get_tp_size,
+    init_context,
+)
 from sglang.srt.model_executor.hook_manager import register_forward_hooks
 from sglang.srt.model_executor.model_runner_kv_cache_mixin import (
     ModelRunnerKVCacheMixin,
@@ -537,8 +543,13 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         if self.device == "cpu":
             self.init_threads_binding()
 
-        # Get available memory before model loading
-        pre_model_load_memory = self.init_torch_distributed()
+        # Resolve and publish the process control context (Global Context Object):
+        # init_context runs init_torch_distributed (resolving every parallel dim +
+        # the TP group) and stashes the pre-model-load memory measurement on
+        # ctx.metrics — read back later by init_memory_pool. use_mla_backend is
+        # dual-written into the context; the legacy global above stays for
+        # non-flipped readers (retiring it is Stage-B P2).
+        init_context(self)
 
         # Initialize MooncakeTransferEngine
         self.init_shared_mooncake_transfer_engine()
@@ -567,7 +578,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self._linear_attn_registry_cache: Any = _UNSET
 
         # Initialize the model runner
-        self.initialize(pre_model_load_memory)
+        self.initialize()
         self.check_quantized_moe_compatibility()
 
         if (
@@ -628,7 +639,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
                 port=self.dist_port,
             )
 
-    def initialize(self, pre_model_load_memory: float):
+    def initialize(self):
         server_args = self.server_args
 
         self.memory_saver_adapter = TorchMemorySaverAdapter.create(
@@ -756,7 +767,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
 
         # Apply torch TP if the model supports it
         supports_torch_tp = getattr(self.model, "supports_torch_tp", False)
-        if self.tp_size > 1 and supports_torch_tp:
+        if get_tp_size() > 1 and supports_torch_tp:
             self.apply_torch_tp()
 
         # Init lora
@@ -780,7 +791,13 @@ class ModelRunner(ModelRunnerKVCacheMixin):
         self.configure_kv_cache_dtype()
 
         # Init memory pool and attention backends
-        self.init_memory_pool(pre_model_load_memory)
+        self.init_memory_pool()
+
+        # Resolution cycle done: materialize static derived flags (moe) and close
+        # the static write surface. Lands after initialize_dp_attention +
+        # initialize_moe_config, so the predicate inputs are resolved. A second
+        # ModelRunner re-publishes a fresh (unfrozen) context, so multi-runner is safe.
+        get_context().freeze()
 
         # Must be called AFTER init_memory_pool so the pool object exists for
         # canary to monkey-patch, and BEFORE init_device_graphs so warmup
@@ -1332,7 +1349,7 @@ class ModelRunner(ModelRunnerKVCacheMixin):
             and self.server_args.remote_instance_weight_loader_backend
             == RemoteInstanceWeightLoaderBackend.NCCL
         ):
-            if self.tp_rank == 0:
+            if get_tp_rank() == 0:
                 instance_ip = NetworkAddress.resolve_host(socket.gethostname())
                 t = threading.Thread(
                     target=trigger_init_weights_send_group_for_remote_instance_request,

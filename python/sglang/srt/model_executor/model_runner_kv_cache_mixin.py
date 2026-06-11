@@ -13,6 +13,7 @@ from sglang.srt.configs.model_config import (
 from sglang.srt.distributed.parallel_state import get_world_group
 from sglang.srt.environ import envs
 from sglang.srt.layers.dp_attention import get_attention_tp_size
+from sglang.srt.model_executor.runtime_context import get_context
 from sglang.srt.mem_cache.allocator import (
     PagedTokenToKVPoolAllocator,
     TokenToKVPoolAllocator,
@@ -963,7 +964,11 @@ class ModelRunnerKVCacheMixin:
         config.mem_fraction_static = self.server_args.mem_fraction_static
         return config
 
-    def init_memory_pool(self: ModelRunner, pre_model_load_memory: int):
+    def init_memory_pool(self: ModelRunner):
+        # The pre-model-load memory measurement lives on the context (stashed by
+        # init_context); read it here at the point of use instead of threading it
+        # through initialize() / init_memory_pool() signatures.
+        pre_model_load_memory = get_context().metrics.pre_model_load_memory
         if not self.spec_algorithm.is_none() and self.is_draft_worker:
             assert (
                 self.memory_pool_config is not None
