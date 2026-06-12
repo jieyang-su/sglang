@@ -1,6 +1,8 @@
 # Adapted from https://github.com/vllm-project/vllm/blob/a6221a144af772fd1a68fe7e627935dc53e81738/vllm/model_executor/layers/fused_moe/layer.py
 
 import logging
+import os
+from contextlib import nullcontext
 from enum import Enum
 from typing import List, Optional, Tuple
 
@@ -90,6 +92,12 @@ _is_cpu = is_cpu()
 _use_aiter = get_bool_env_var("SGLANG_USE_AITER") and _is_hip
 
 logger = logging.getLogger(__name__)
+
+
+def _aic_moe_record_function(name: str):
+    if os.getenv("SGLANG_AIC_MOE_PROFILE", "").lower() in ("1", "true", "yes"):
+        return torch.profiler.record_function(name)
+    return nullcontext()
 
 
 def create_moe_dispatcher(moe_runner_config: MoeRunnerConfig) -> BaseDispatcher:
@@ -980,9 +988,12 @@ class FusedMoE(torch.nn.Module):
         origin_hidden_states_dim = hidden_states.shape[-1]
         assert self.quant_method is not None
 
-        dispatch_output = self.dispatcher.dispatch(
-            hidden_states=hidden_states, topk_output=topk_output
-        )
+        with _aic_moe_record_function(
+            f"aic_moe/layer_{self.layer_id}/routed/dispatch"
+        ):
+            dispatch_output = self.dispatcher.dispatch(
+                hidden_states=hidden_states, topk_output=topk_output
+            )
         if _use_aiter and self.dispatcher.local_expert_mapping is not None:
             self.expert_mask_gpu = (
                 (
@@ -993,14 +1004,22 @@ class FusedMoE(torch.nn.Module):
                 .to(device="cuda")
             )
 
-        combine_input = self.run_moe_core(
-            dispatch_output=dispatch_output,
-        )
+        with _aic_moe_record_function(
+            f"aic_moe/layer_{self.layer_id}/routed/compute"
+        ):
+            combine_input = self.run_moe_core(
+                dispatch_output=dispatch_output,
+            )
 
         with use_symmetric_memory(
             get_tp_group(), disabled=not is_allocation_symmetric()
         ):
-            final_hidden_states = self.dispatcher.combine(combine_input=combine_input)
+            with _aic_moe_record_function(
+                f"aic_moe/layer_{self.layer_id}/routed/combine"
+            ):
+                final_hidden_states = self.dispatcher.combine(
+                    combine_input=combine_input
+                )
 
             # TODO: should we add some conditions here?
             final_hidden_states = final_hidden_states[
@@ -1008,7 +1027,12 @@ class FusedMoE(torch.nn.Module):
             ].contiguous()
 
         if self.reduce_results and (self.moe_tp_size > 1 or self.moe_ep_size > 1):
-            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
+            with _aic_moe_record_function(
+                f"aic_moe/layer_{self.layer_id}/routed/all_reduce"
+            ):
+                final_hidden_states = tensor_model_parallel_all_reduce(
+                    final_hidden_states
+                )
 
         return final_hidden_states
 
@@ -1186,34 +1210,40 @@ class FlashInferFusedMoE(FusedMoE):
             ):
                 # TODO: Now trtllm_bf16_moe doesn't support inplace output,
                 # we can move this out when it support that.
-                final_hidden_states = trtllm_bf16_moe(
-                    routing_logits=router_logits,
-                    routing_bias=correction_bias,
-                    hidden_states=hidden_states,
-                    gemm1_weights=self.w13_weight,
-                    gemm2_weights=self.w2_weight,
-                    num_experts=self.num_experts,
-                    top_k=topk_config.top_k,
-                    n_group=topk_config.num_expert_group,
-                    topk_group=topk_config.topk_group,
-                    intermediate_size=self.intermediate_size_per_partition,
-                    local_expert_offset=self.moe_ep_rank * self.num_local_experts,
-                    local_num_experts=self.num_local_experts,
-                    routing_method_type=self.routing_method_type,
-                    routed_scaling_factor=routed_scaling_factor,
-                    tune_max_num_tokens=next_power_of_2(hidden_states.shape[0]),
-                )
+                with _aic_moe_record_function(
+                    f"aic_moe/layer_{self.layer_id}/routed/compute"
+                ):
+                    final_hidden_states = trtllm_bf16_moe(
+                        routing_logits=router_logits,
+                        routing_bias=correction_bias,
+                        hidden_states=hidden_states,
+                        gemm1_weights=self.w13_weight,
+                        gemm2_weights=self.w2_weight,
+                        num_experts=self.num_experts,
+                        top_k=topk_config.top_k,
+                        n_group=topk_config.num_expert_group,
+                        topk_group=topk_config.topk_group,
+                        intermediate_size=self.intermediate_size_per_partition,
+                        local_expert_offset=self.moe_ep_rank * self.num_local_experts,
+                        local_num_experts=self.num_local_experts,
+                        routing_method_type=self.routing_method_type,
+                        routed_scaling_factor=routed_scaling_factor,
+                        tune_max_num_tokens=next_power_of_2(hidden_states.shape[0]),
+                    )
 
         else:
 
-            final_hidden_states = self.quant_method.apply(
-                layer=self,
-                dispatch_output=StandardDispatchOutput(
-                    hidden_states=hidden_states,
-                    hidden_states_scale=None,
-                    topk_output=topk_output,
-                ),
-            ).hidden_states
+            with _aic_moe_record_function(
+                f"aic_moe/layer_{self.layer_id}/routed/compute"
+            ):
+                final_hidden_states = self.quant_method.apply(
+                    layer=self,
+                    dispatch_output=StandardDispatchOutput(
+                        hidden_states=hidden_states,
+                        hidden_states_scale=None,
+                        topk_output=topk_output,
+                    ),
+                ).hidden_states
 
         # NOTE for symmetric memory tagging:
         # We do not create the context in this function.
@@ -1221,7 +1251,12 @@ class FlashInferFusedMoE(FusedMoE):
         # This can allow fine-grained tagging.
 
         if self.reduce_results and (self.moe_tp_size > 1 or self.moe_ep_size > 1):
-            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
+            with _aic_moe_record_function(
+                f"aic_moe/layer_{self.layer_id}/routed/all_reduce"
+            ):
+                final_hidden_states = tensor_model_parallel_all_reduce(
+                    final_hidden_states
+                )
 
         return final_hidden_states
 
@@ -1330,46 +1365,49 @@ class FlashInferFP4MoE(FusedMoE):
                 num_tokens, hidden_size, dtype=torch.bfloat16, device=hs_fp4.device
             )
 
-        result = trtllm_fp4_block_scale_moe(
-            routing_logits=router_logits,
-            routing_bias=correction_bias,
-            hidden_states=hs_fp4,
-            hidden_states_scale=hs_scale_linear.view(torch.float8_e4m3fn),
-            gemm1_weights=self.gemm1_weights_fp4_shuffled.data,
-            gemm1_weights_scale=self.gemm1_scales_fp4_shuffled.data.view(
-                torch.float8_e4m3fn
-            ),
-            gemm1_bias=None,
-            gemm1_alpha=None,
-            gemm1_beta=None,
-            gemm1_clamp_limit=None,
-            gemm2_weights=self.gemm2_weights_fp4_shuffled.data,
-            gemm2_weights_scale=self.gemm2_scales_fp4_shuffled.data.view(
-                torch.float8_e4m3fn
-            ),
-            gemm2_bias=None,
-            output1_scale_scalar=self.g1_scale_c.data,
-            output1_scale_gate_scalar=self.g1_alphas.data,
-            output2_scale_scalar=self.g2_alphas.data,
-            num_experts=self.num_experts,
-            top_k=topk_config.top_k,
-            n_group=topk_config.num_expert_group,
-            topk_group=topk_config.topk_group,
-            intermediate_size=self.intermediate_size_per_partition,
-            local_expert_offset=self.moe_ep_rank * self.num_local_experts,
-            local_num_experts=self.num_local_experts,
-            routed_scaling_factor=self.moe_runner_config.routed_scaling_factor,
-            # Respect the routing method configured for this layer (e.g., Renormalize for Qwen3),
-            # instead of always assuming DeepSeekV3.
-            routing_method_type=(
-                self.routing_method_type
-                if self.routing_method_type is not None
-                else RoutingMethodType.Default
-            ),
-            do_finalize=True,
-            tune_max_num_tokens=next_power_of_2(hs_fp4.shape[0]),
-            output=symm_output,
-        )[0]
+        with _aic_moe_record_function(
+            f"aic_moe/layer_{self.layer_id}/routed/compute"
+        ):
+            result = trtllm_fp4_block_scale_moe(
+                routing_logits=router_logits,
+                routing_bias=correction_bias,
+                hidden_states=hs_fp4,
+                hidden_states_scale=hs_scale_linear.view(torch.float8_e4m3fn),
+                gemm1_weights=self.gemm1_weights_fp4_shuffled.data,
+                gemm1_weights_scale=self.gemm1_scales_fp4_shuffled.data.view(
+                    torch.float8_e4m3fn
+                ),
+                gemm1_bias=None,
+                gemm1_alpha=None,
+                gemm1_beta=None,
+                gemm1_clamp_limit=None,
+                gemm2_weights=self.gemm2_weights_fp4_shuffled.data,
+                gemm2_weights_scale=self.gemm2_scales_fp4_shuffled.data.view(
+                    torch.float8_e4m3fn
+                ),
+                gemm2_bias=None,
+                output1_scale_scalar=self.g1_scale_c.data,
+                output1_scale_gate_scalar=self.g1_alphas.data,
+                output2_scale_scalar=self.g2_alphas.data,
+                num_experts=self.num_experts,
+                top_k=topk_config.top_k,
+                n_group=topk_config.num_expert_group,
+                topk_group=topk_config.topk_group,
+                intermediate_size=self.intermediate_size_per_partition,
+                local_expert_offset=self.moe_ep_rank * self.num_local_experts,
+                local_num_experts=self.num_local_experts,
+                routed_scaling_factor=self.moe_runner_config.routed_scaling_factor,
+                # Respect the routing method configured for this layer (e.g., Renormalize for Qwen3),
+                # instead of always assuming DeepSeekV3.
+                routing_method_type=(
+                    self.routing_method_type
+                    if self.routing_method_type is not None
+                    else RoutingMethodType.Default
+                ),
+                do_finalize=True,
+                tune_max_num_tokens=next_power_of_2(hs_fp4.shape[0]),
+                output=symm_output,
+            )[0]
 
         return result
 

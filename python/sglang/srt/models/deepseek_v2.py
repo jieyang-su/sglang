@@ -202,6 +202,12 @@ else:
 logger = logging.getLogger(__name__)
 
 
+def _aic_moe_record_function(name: str):
+    if os.getenv("SGLANG_AIC_MOE_PROFILE", "").lower() in ("1", "true", "yes"):
+        return torch.profiler.record_function(name)
+    return nullcontext()
+
+
 FORWARD_ABSORB_CORE_ATTENTION_BACKENDS = [
     "fa3",
     "nsa",
@@ -563,30 +569,31 @@ class DeepseekV2MoE(nn.Module):
         use_reduce_scatter: bool = False,
         gemm_output_zero_allocator: BumpAllocator = None,
     ) -> torch.Tensor:
-        if not self._enable_a2a_moe:
-            from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
+        with _aic_moe_record_function(f"aic_moe/layer_{self.layer_id}/module"):
+            if not self._enable_a2a_moe:
+                from sglang.srt.model_executor.cuda_graph_runner import get_is_capture_mode
 
-            if (
-                self.alt_stream is not None
-                and self.num_fused_shared_experts == 0
-                and hidden_states.shape[0] > 0
-                and get_is_capture_mode()
-            ):
-                return self.forward_normal_dual_stream(
-                    hidden_states,
-                    should_allreduce_fusion,
-                    use_reduce_scatter,
-                    gemm_output_zero_allocator,
-                )
+                if (
+                    self.alt_stream is not None
+                    and self.num_fused_shared_experts == 0
+                    and hidden_states.shape[0] > 0
+                    and get_is_capture_mode()
+                ):
+                    return self.forward_normal_dual_stream(
+                        hidden_states,
+                        should_allreduce_fusion,
+                        use_reduce_scatter,
+                        gemm_output_zero_allocator,
+                    )
+                else:
+                    return self.forward_normal(
+                        hidden_states,
+                        should_allreduce_fusion,
+                        use_reduce_scatter,
+                        gemm_output_zero_allocator,
+                    )
             else:
-                return self.forward_normal(
-                    hidden_states,
-                    should_allreduce_fusion,
-                    use_reduce_scatter,
-                    gemm_output_zero_allocator,
-                )
-        else:
-            return self.forward_deepep(hidden_states, forward_batch)
+                return self.forward_deepep(hidden_states, forward_batch)
 
     def forward_normal_dual_stream(
         self,
@@ -598,27 +605,51 @@ class DeepseekV2MoE(nn.Module):
 
         current_stream = torch.cuda.current_stream()
         self.alt_stream.wait_stream(current_stream)
-        shared_output = self._forward_shared_experts(
-            hidden_states, gemm_output_zero_allocator
-        )
+        with _aic_moe_record_function(
+            f"aic_moe/layer_{self.layer_id}/shared_experts"
+        ):
+            shared_output = self._forward_shared_experts(
+                hidden_states, gemm_output_zero_allocator
+            )
 
         with torch.cuda.stream(self.alt_stream):
             # router_logits: (num_tokens, n_experts)
-            router_logits = self.gate(hidden_states, gemm_output_zero_allocator)
-            topk_output = self.topk(hidden_states, router_logits)
-            final_hidden_states = self.experts(hidden_states, topk_output)
-            if not _is_cuda or isinstance(self.experts.quant_method, KTEPWrapperMethod):
-                final_hidden_states *= self.routed_scaling_factor
+            with _aic_moe_record_function(f"aic_moe/layer_{self.layer_id}/router"):
+                router_logits = self.gate(hidden_states, gemm_output_zero_allocator)
+            with _aic_moe_record_function(
+                f"aic_moe/layer_{self.layer_id}/collector/moe"
+            ):
+                with _aic_moe_record_function(f"aic_moe/layer_{self.layer_id}/topk"):
+                    topk_output = self.topk(hidden_states, router_logits)
+                with _aic_moe_record_function(
+                    f"aic_moe/layer_{self.layer_id}/routed_experts"
+                ):
+                    final_hidden_states = self.experts(hidden_states, topk_output)
+            with _aic_moe_record_function(
+                f"aic_moe/layer_{self.layer_id}/output_postprocess"
+            ):
+                if not _is_cuda or isinstance(
+                    self.experts.quant_method, KTEPWrapperMethod
+                ):
+                    final_hidden_states *= self.routed_scaling_factor
 
         current_stream.wait_stream(self.alt_stream)
-        final_hidden_states += shared_output
+        with _aic_moe_record_function(
+            f"aic_moe/layer_{self.layer_id}/output_postprocess"
+        ):
+            final_hidden_states += shared_output
         if (
             self.tp_size > 1
             and not should_allreduce_fusion
             and not use_reduce_scatter
             and not should_use_flashinfer_cutlass_moe_fp4_allgather()
         ):
-            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
+            with _aic_moe_record_function(
+                f"aic_moe/layer_{self.layer_id}/output_all_reduce"
+            ):
+                final_hidden_states = tensor_model_parallel_all_reduce(
+                    final_hidden_states
+                )
         return final_hidden_states
 
     def forward_normal(
@@ -637,66 +668,116 @@ class DeepseekV2MoE(nn.Module):
             if (
                 not self._fuse_shared_experts_inside_sbo
             ):  # TODO: check if it supports mtp
-                shared_output = self._forward_shared_experts(
-                    hidden_states, gemm_output_zero_allocator
-                )
-            # router_logits: (num_tokens, n_experts)
-            router_logits = self.gate(hidden_states, gemm_output_zero_allocator)
-            topk_output = self.topk(hidden_states, router_logits)
-        else:
-            shared_output = None
-            topk_output = self.topk.empty_topk_output(hidden_states.device)
-
-        if self._fuse_shared_experts_inside_sbo:
-            shared_output = None
-
-            def _pre_combine_hook(
-                dispatcher: BaseDispatcher, combine_input: CombineInput
-            ):
-
-                nonlocal shared_output
-                self.alt_stream.wait_stream(torch.cuda.current_stream())
-                with torch.cuda.stream(self.alt_stream):
+                with _aic_moe_record_function(
+                    f"aic_moe/layer_{self.layer_id}/shared_experts"
+                ):
                     shared_output = self._forward_shared_experts(
                         hidden_states, gemm_output_zero_allocator
                     )
+            # router_logits: (num_tokens, n_experts)
+            with _aic_moe_record_function(f"aic_moe/layer_{self.layer_id}/router"):
+                router_logits = self.gate(hidden_states, gemm_output_zero_allocator)
+            collector_moe_active = (
+                not self._fuse_shared_experts_inside_sbo
+            )
+            collector_moe_ctx = (
+                _aic_moe_record_function(
+                    f"aic_moe/layer_{self.layer_id}/collector/moe"
+                )
+                if collector_moe_active
+                else nullcontext()
+            )
+            if collector_moe_active:
+                collector_moe_ctx.__enter__()
+            try:
+                with _aic_moe_record_function(f"aic_moe/layer_{self.layer_id}/topk"):
+                    topk_output = self.topk(hidden_states, router_logits)
+            except BaseException as exc:
+                if collector_moe_active:
+                    collector_moe_ctx.__exit__(type(exc), exc, exc.__traceback__)
+                raise
+        else:
+            shared_output = None
+            topk_output = self.topk.empty_topk_output(hidden_states.device)
+            collector_moe_ctx = nullcontext()
+            collector_moe_active = False
 
-                pre_combine_hook_handle.remove()
+        try:
+            if self._fuse_shared_experts_inside_sbo:
+                shared_output = None
 
-            def _post_combine_hook(
-                dispatcher: BaseDispatcher, hidden_states: torch.Tensor
+                def _pre_combine_hook(
+                    dispatcher: BaseDispatcher, combine_input: CombineInput
+                ):
+
+                    nonlocal shared_output
+                    self.alt_stream.wait_stream(torch.cuda.current_stream())
+                    with torch.cuda.stream(self.alt_stream):
+                        with _aic_moe_record_function(
+                            f"aic_moe/layer_{self.layer_id}/shared_experts"
+                        ):
+                            shared_output = self._forward_shared_experts(
+                                hidden_states, gemm_output_zero_allocator
+                            )
+
+                    pre_combine_hook_handle.remove()
+
+                def _post_combine_hook(
+                    dispatcher: BaseDispatcher, hidden_states: torch.Tensor
+                ):
+                    nonlocal shared_output
+                    torch.cuda.current_stream().wait_stream(self.alt_stream)
+                    post_combine_hook_handle.remove()
+
+                pre_combine_hook_handle = (
+                    self.experts.dispatcher.register_pre_combine_hook(
+                        _pre_combine_hook
+                    )
+                )
+                post_combine_hook_handle = (
+                    self.experts.dispatcher.register_post_combine_hook(
+                        _post_combine_hook
+                    )
+                )
+
+            with _aic_moe_record_function(
+                f"aic_moe/layer_{self.layer_id}/routed_experts"
             ):
-                nonlocal shared_output
-                torch.cuda.current_stream().wait_stream(self.alt_stream)
-                post_combine_hook_handle.remove()
-
-            pre_combine_hook_handle = self.experts.dispatcher.register_pre_combine_hook(
-                _pre_combine_hook
-            )
-            post_combine_hook_handle = (
-                self.experts.dispatcher.register_post_combine_hook(_post_combine_hook)
-            )
-
-        final_hidden_states = self.experts(
-            hidden_states,
-            topk_output,
-        )
-        if (
-            not _is_cuda
-            and not _use_aiter
-            or isinstance(self.experts.quant_method, KTEPWrapperMethod)
+                final_hidden_states = self.experts(
+                    hidden_states,
+                    topk_output,
+                )
+        except BaseException as exc:
+            if collector_moe_active:
+                collector_moe_ctx.__exit__(type(exc), exc, exc.__traceback__)
+            raise
+        else:
+            if collector_moe_active:
+                collector_moe_ctx.__exit__(None, None, None)
+        with _aic_moe_record_function(
+            f"aic_moe/layer_{self.layer_id}/output_postprocess"
         ):
-            # fused in biased_grouped_topk so we can skip here
-            final_hidden_states *= self.routed_scaling_factor
-        if shared_output is not None:
-            final_hidden_states += shared_output
+            if (
+                not _is_cuda
+                and not _use_aiter
+                or isinstance(self.experts.quant_method, KTEPWrapperMethod)
+            ):
+                # fused in biased_grouped_topk so we can skip here
+                final_hidden_states *= self.routed_scaling_factor
+            if shared_output is not None:
+                final_hidden_states += shared_output
         if (
             self.tp_size > 1
             and not should_allreduce_fusion
             and not use_reduce_scatter
             and not should_use_flashinfer_cutlass_moe_fp4_allgather()
         ):
-            final_hidden_states = tensor_model_parallel_all_reduce(final_hidden_states)
+            with _aic_moe_record_function(
+                f"aic_moe/layer_{self.layer_id}/output_all_reduce"
+            ):
+                final_hidden_states = tensor_model_parallel_all_reduce(
+                    final_hidden_states
+                )
         return final_hidden_states
 
     def forward_cpu(
@@ -771,24 +852,36 @@ class DeepseekV2MoE(nn.Module):
 
         if hidden_states.shape[0] > 0:
             # router_logits: (num_tokens, n_experts)
-            router_logits = self.gate(hidden_states, forward_batch=forward_batch)
+            with _aic_moe_record_function(f"aic_moe/layer_{self.layer_id}/router"):
+                router_logits = self.gate(
+                    hidden_states, forward_batch=forward_batch
+                )
             if not sbo_enabled_flag:
                 if self.alt_stream is not None:
                     self.alt_stream.wait_stream(torch.cuda.current_stream())
                     with torch.cuda.stream(self.alt_stream):
-                        shared_output = self._forward_shared_experts(hidden_states)
+                        with _aic_moe_record_function(
+                            f"aic_moe/layer_{self.layer_id}/shared_experts"
+                        ):
+                            shared_output = self._forward_shared_experts(
+                                hidden_states
+                            )
                         shared_output.record_stream(self.alt_stream)
                         shared_event = self.alt_stream.record_event()
                 else:
-                    shared_output = self._forward_shared_experts(hidden_states)
-            topk_output = self.topk(
-                hidden_states,
-                router_logits,
-                num_token_non_padded=forward_batch.num_token_non_padded,
-                expert_location_dispatch_info=ExpertLocationDispatchInfo.init_new(
-                    layer_id=self.layer_id,
-                ),
-            )
+                    with _aic_moe_record_function(
+                        f"aic_moe/layer_{self.layer_id}/shared_experts"
+                    ):
+                        shared_output = self._forward_shared_experts(hidden_states)
+            with _aic_moe_record_function(f"aic_moe/layer_{self.layer_id}/topk"):
+                topk_output = self.topk(
+                    hidden_states,
+                    router_logits,
+                    num_token_non_padded=forward_batch.num_token_non_padded,
+                    expert_location_dispatch_info=ExpertLocationDispatchInfo.init_new(
+                        layer_id=self.layer_id,
+                    ),
+                )
         else:
             topk_output = self.topk.empty_topk_output(hidden_states.device)
 
@@ -797,7 +890,10 @@ class DeepseekV2MoE(nn.Module):
 
             def _deepep_dispatch_hook(dispatcher: BaseDispatcher):
                 nonlocal shared_output
-                shared_output = self._forward_shared_experts(hidden_states)
+                with _aic_moe_record_function(
+                    f"aic_moe/layer_{self.layer_id}/shared_experts"
+                ):
+                    shared_output = self._forward_shared_experts(hidden_states)
                 for handle in deepep_dispatch_hook_handle:
                     handle.remove()
 
@@ -873,7 +969,10 @@ class DeepseekV2MoE(nn.Module):
                 with deep_gemm_wrapper.configure_deep_gemm_num_sms(
                     dispatcher.meta_overlap_args["compute_num_sms"]
                 ):
-                    shared_output = self._forward_shared_experts(hidden_states)
+                    with _aic_moe_record_function(
+                        f"aic_moe/layer_{self.layer_id}/shared_experts"
+                    ):
+                        shared_output = self._forward_shared_experts(hidden_states)
 
                 pre_combine_hook_handle.remove()
 
@@ -940,10 +1039,13 @@ class DeepseekV2MoE(nn.Module):
                 self.experts.dispatcher.register_post_combine_hook(_post_combine_hook)
             )
 
-        final_hidden_states = self.experts(
-            hidden_states=hidden_states,
-            topk_output=topk_output,
-        )
+        with _aic_moe_record_function(
+            f"aic_moe/layer_{self.layer_id}/routed_experts"
+        ):
+            final_hidden_states = self.experts(
+                hidden_states=hidden_states,
+                topk_output=topk_output,
+            )
 
         if (
             hidden_states.shape[0] > 0
@@ -951,20 +1053,23 @@ class DeepseekV2MoE(nn.Module):
             and self.alt_stream is not None
         ):
             torch.cuda.current_stream().wait_event(shared_event)
-        if shared_output is not None:
-            x = shared_output
-            # aiter moe call will handle routed_scaling_factor in the function
-            # so add _use_aiter condition to eliminate to use self.routed_scaling_factor in add_ call
-            if self.experts.should_fuse_routed_scaling_factor_in_topk or _use_aiter:
-                x.add_(final_hidden_states)
+        with _aic_moe_record_function(
+            f"aic_moe/layer_{self.layer_id}/output_postprocess"
+        ):
+            if shared_output is not None:
+                x = shared_output
+                # aiter moe call will handle routed_scaling_factor in the function
+                # so add _use_aiter condition to eliminate to use self.routed_scaling_factor in add_ call
+                if self.experts.should_fuse_routed_scaling_factor_in_topk or _use_aiter:
+                    x.add_(final_hidden_states)
+                else:
+                    x.add_(final_hidden_states, alpha=self.routed_scaling_factor)
+                final_hidden_states = x
             else:
-                x.add_(final_hidden_states, alpha=self.routed_scaling_factor)
-            final_hidden_states = x
-        else:
-            if not (
-                self.experts.should_fuse_routed_scaling_factor_in_topk or _use_aiter
-            ):
-                final_hidden_states *= self.routed_scaling_factor
+                if not (
+                    self.experts.should_fuse_routed_scaling_factor_in_topk or _use_aiter
+                ):
+                    final_hidden_states *= self.routed_scaling_factor
 
         return final_hidden_states
 
@@ -983,7 +1088,8 @@ class DeepseekV2MoE(nn.Module):
             state.forward_batch.forward_mode, state.hidden_states_mlp_input
         ):
             # router_logits: (num_tokens, n_experts)
-            state.router_logits = self.gate(state.hidden_states_mlp_input)
+            with _aic_moe_record_function(f"aic_moe/layer_{self.layer_id}/router"):
+                state.router_logits = self.gate(state.hidden_states_mlp_input)
         else:
             state.router_logits = None
 
@@ -992,7 +1098,10 @@ class DeepseekV2MoE(nn.Module):
         if (self.num_fused_shared_experts == 0) and is_non_idle_and_non_empty(
             state.forward_batch.forward_mode, hidden_states_mlp_input
         ):
-            state.shared_output = self.shared_experts(hidden_states_mlp_input)
+            with _aic_moe_record_function(
+                f"aic_moe/layer_{self.layer_id}/shared_experts"
+            ):
+                state.shared_output = self.shared_experts(hidden_states_mlp_input)
         else:
             state.shared_output = None
 
@@ -1004,64 +1113,81 @@ class DeepseekV2MoE(nn.Module):
             with get_global_expert_distribution_recorder().with_current_layer(
                 self.layer_id
             ):
-                state.topk_output = self.topk(
-                    hidden_states=hidden_states,
-                    router_logits=router_logits,
-                    num_token_non_padded=state.forward_batch.num_token_non_padded,
-                    expert_location_dispatch_info=ExpertLocationDispatchInfo.init_new(
-                        layer_id=self.layer_id,
-                    ),
-                )
+                with _aic_moe_record_function(f"aic_moe/layer_{self.layer_id}/topk"):
+                    state.topk_output = self.topk(
+                        hidden_states=hidden_states,
+                        router_logits=router_logits,
+                        num_token_non_padded=state.forward_batch.num_token_non_padded,
+                        expert_location_dispatch_info=ExpertLocationDispatchInfo.init_new(
+                            layer_id=self.layer_id,
+                        ),
+                    )
         else:
             state.topk_output = self.topk.empty_topk_output(hidden_states.device)
 
     def op_dispatch_a(self, state):
         if self.ep_size > 1:
-            self.experts.dispatcher.dispatch_a(
-                hidden_states=state.hidden_states_mlp_input,
-                topk_output=state.pop("topk_output"),
-                tbo_subbatch_index=state.get("tbo_subbatch_index"),
-            )
+            with _aic_moe_record_function(
+                f"aic_moe/layer_{self.layer_id}/routed/dispatch_a"
+            ):
+                self.experts.dispatcher.dispatch_a(
+                    hidden_states=state.hidden_states_mlp_input,
+                    topk_output=state.pop("topk_output"),
+                    tbo_subbatch_index=state.get("tbo_subbatch_index"),
+                )
 
     def op_dispatch_b(self, state):
         if self.ep_size > 1:
             with get_global_expert_distribution_recorder().with_current_layer(
                 self.layer_id
             ):
-                state.dispatch_output = self.experts.dispatcher.dispatch_b(
-                    tbo_subbatch_index=state.get("tbo_subbatch_index"),
-                )
+                with _aic_moe_record_function(
+                    f"aic_moe/layer_{self.layer_id}/routed/dispatch_b"
+                ):
+                    state.dispatch_output = self.experts.dispatcher.dispatch_b(
+                        tbo_subbatch_index=state.get("tbo_subbatch_index"),
+                    )
 
     def op_experts(self, state):
-        state.combine_input = self.experts.run_moe_core(
-            dispatch_output=state.dispatch_output,
-        )
+        with _aic_moe_record_function(f"aic_moe/layer_{self.layer_id}/routed/compute"):
+            state.combine_input = self.experts.run_moe_core(
+                dispatch_output=state.dispatch_output,
+            )
 
     def op_combine_a(self, state):
         if self.ep_size > 1:
-            self.experts.dispatcher.combine_a(
-                combine_input=state.pop("combine_input"),
-                tbo_subbatch_index=state.get("tbo_subbatch_index"),
-            )
+            with _aic_moe_record_function(
+                f"aic_moe/layer_{self.layer_id}/routed/combine_a"
+            ):
+                self.experts.dispatcher.combine_a(
+                    combine_input=state.pop("combine_input"),
+                    tbo_subbatch_index=state.get("tbo_subbatch_index"),
+                )
             state.pop("dispatch_output")
 
     def op_combine_b(self, state):
         if self.ep_size > 1:
-            state.hidden_states_after_combine = self.experts.dispatcher.combine_b(
-                tbo_subbatch_index=state.get("tbo_subbatch_index"),
-            )
+            with _aic_moe_record_function(
+                f"aic_moe/layer_{self.layer_id}/routed/combine_b"
+            ):
+                state.hidden_states_after_combine = self.experts.dispatcher.combine_b(
+                    tbo_subbatch_index=state.get("tbo_subbatch_index"),
+                )
 
     def op_output(self, state):
         final_hidden_states = state.pop("hidden_states_after_combine")
 
-        if (shared_output := state.pop("shared_output")) is not None:
-            x = shared_output
-            x.add_(final_hidden_states, alpha=self.routed_scaling_factor)
-            final_hidden_states = x
-        else:
-            final_hidden_states *= self.routed_scaling_factor
+        with _aic_moe_record_function(
+            f"aic_moe/layer_{self.layer_id}/output_postprocess"
+        ):
+            if (shared_output := state.pop("shared_output")) is not None:
+                x = shared_output
+                x.add_(final_hidden_states, alpha=self.routed_scaling_factor)
+                final_hidden_states = x
+            else:
+                final_hidden_states *= self.routed_scaling_factor
 
-        state.hidden_states_mlp_output = final_hidden_states
+            state.hidden_states_mlp_output = final_hidden_states
 
 
 class DeepseekV2AttentionMLA(nn.Module, DeepseekMHAForwardMixin):
